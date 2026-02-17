@@ -84,20 +84,49 @@ static void drawRain() {
 static void convergeAndFadeOut() {
   for (int frame = 0; frame < 40; frame++) {
     display.clearDisplay();
+
     for (int i = 0; i < NUM_BITS; i++) {
+      // Movimiento suave hacia el punto objetivo
       bits[i].x += (bits[i].tx - bits[i].x) * 0.25;
       bits[i].y += (bits[i].ty - bits[i].y) * 0.25;
-      if (frame < 30) {
+
+      // 🔥 Desvanecimiento progresivo: los bits desaparecen al acercarse
+      float dx = abs(bits[i].tx - bits[i].x);
+      float dy = abs(bits[i].ty - bits[i].y);
+      float dist = sqrt(dx * dx + dy * dy);
+
+      if (dist > 3) { // aún lejos → visible
         display.setCursor(bits[i].x, bits[i].y);
         display.write(bits[i].value);
       }
     }
+
+    // Efecto NeoPixel sincronizado
+    if (frame < 15)
+      pixels.setPixelColor(0, pixels.Color(0, 0, 30));
+    else if (frame < 30)
+      pixels.setPixelColor(0, pixels.Color(0, 120, 40));
+    else
+      pixels.setPixelColor(0, pixels.Color(0, 255, 80));
+
+    pixels.show();
+
     display.display();
     delay(30);
   }
+
+  // 🧹 Limpieza final
   display.clearDisplay();
   display.display();
+  pixels.clear();
+  pixels.show();
 }
+
+
+
+
+
+
 
 static void glitchLogoAggressive(int duration) {
   int x = (display.width() - LOGO_WIDTH) / 2;

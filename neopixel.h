@@ -6,7 +6,7 @@
 #include <vector>
 #include <string>
 
-extern Adafruit_NeoPixel pixels;  // ✅ referencia global
+extern Adafruit_NeoPixel pixels;  //  referencia global
 
 void neopixelSetup();
 void setNeoPixelColour(const std::string &colour);

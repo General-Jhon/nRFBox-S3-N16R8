@@ -9,144 +9,177 @@ extern void header(const char* title);
 
 namespace BleJammer {
 
-// Instancias globales de las dos radios (A y B)
-static RF24 radioA(NRF_CE_PIN_A, NRF_CSN_PIN_A);
-static RF24 radioB(NRF_CE_PIN_B, NRF_CSN_PIN_B);
+// Definiciones de pines y canales
+#define CE_PIN_1  5
+#define CSN_PIN_1 21
 
-enum JamMode { JAM_OFF = 0, JAM_BLE, JAM_BT };
-static JamMode jamMode = JAM_OFF;
+#define CE_PIN_2  15
+#define CSN_PIN_2 7
 
-static unsigned long lastJammed = 0;
-static unsigned long jamPacketsSent = 0;
-static int jamChannel = -1;
+#define MODE_BUTTON 9
 
-// Configurar radio individual
-static void configureRadio(RF24 &r) {
-  r.setAutoAck(false);
-  r.stopListening();
-  r.setRetries(0, 0);
-  r.setPALevel(RF24_PA_LOW);  // potencia baja para entorno controlado
-  r.setDataRate(RF24_2MBPS);
-  r.setCRCLength(RF24_CRC_DISABLED);
+class MyRF24 : public RF24 {
+public:
+    MyRF24(uint8_t ce_pin, uint8_t csn_pin, uint32_t speed = 0) : RF24(ce_pin, csn_pin, speed) {}
+    uint8_t getStatus() {
+        return read_register(NRF_STATUS);
+    }
+};
+
+MyRF24 radio1(CE_PIN_1, CSN_PIN_1, 16000000);
+MyRF24 radio2(CE_PIN_2, CSN_PIN_2, 16000000);
+
+enum OperationMode { DEACTIVE_MODE, BLE_MODULE, Bluetooth_MODULE };
+OperationMode currentMode = DEACTIVE_MODE;
+
+int bluetooth_channels[] = {32, 34, 46, 48, 50, 52, 0, 1, 2, 4, 6, 8, 22, 24, 26, 28, 30, 74, 76, 78, 80};
+int ble_channels[] = {2, 26, 80};
+
+const byte BLE_channels[] = {2, 26, 80};
+byte channelGroup1[] = {2, 5, 8, 11};
+byte channelGroup2[] = {26, 29, 32, 35};
+
+volatile bool modeChangeRequested = false;
+
+unsigned long lastJammingTime = 0;
+const unsigned long jammingInterval = 10;
+
+unsigned long lastButtonPressTime = 0;
+const unsigned long debounceDelay = 500;
+
+void IRAM_ATTR handleButtonPress() {
+  unsigned long currentTime = millis();
+  if (currentTime - lastButtonPressTime > debounceDelay) {
+    modeChangeRequested = true;
+    lastButtonPressTime = currentTime;
+  }
 }
 
-// =========================================================
-//                         SETUP
-// =========================================================
+void configureRadio(MyRF24 &radio) {
+  radio.setAutoAck(false);
+  radio.stopListening();
+  radio.setRetries(0, 0);
+  radio.setPALevel(RF24_PA_MAX, true);
+  radio.setDataRate(RF24_2MBPS);
+  radio.setCRCLength(RF24_CRC_DISABLED);
+  radio.setAddressWidth(5);
+  radio.setPayloadSize(32);
+  radio.openWritingPipe(0xE7E7E7E7E7LL);
+  radio.openReadingPipe(1, 0xC2C2C2C2C2LL);
+  radio.printPrettyDetails();
+}
+
+void initializeRadiosMultiMode() {
+  if (radio1.begin()) {
+    configureRadio(radio1);
+  }
+  if (radio2.begin()) {
+    configureRadio(radio2);
+  }
+}
+
+void initializeRadios() {
+  if (currentMode == !DEACTIVE_MODE) {
+    initializeRadiosMultiMode();
+  } else if (currentMode == DEACTIVE_MODE) {
+    radio1.powerDown();
+    radio2.powerDown();
+    delay(100);
+  }
+}
+
+void jammer(MyRF24 &radio, const byte* channels, size_t size) {
+  const char text[] = "xxxxxxxxxxxxxxxx";
+  for (size_t i = 0; i < size; i++) {
+    radio.setChannel(channels[i]);
+    if (radio.isChipConnected()) {
+      bool success = radio.write(&text, sizeof(text));
+      if (success) {
+        Serial.print("Paquete enviado en canal ");
+        Serial.println(channels[i]);
+      } else {
+        Serial.print("Error al enviar paquete en canal ");
+        Serial.println(channels[i]);
+        Serial.print("Estado de la radio: ");
+        Serial.println(radio.getStatus(), HEX);
+        Serial.print("Registro de estado: ");
+        Serial.println(radio.getStatus(), BIN);
+      }
+    } else {
+      Serial.print("Radio no conectada en canal ");
+      Serial.println(channels[i]);
+    }
+  }
+}
+
+void updateOLED() {
+  oled.clearBuffer();
+  oled.setFont(u8g2_font_ncenB08_tr);
+
+  oled.setCursor(0, 10);
+  oled.print("Mode ");
+  oled.print(" ....... ");
+  oled.setCursor(65, 10);
+  oled.print("[");
+  oled.print(currentMode == BLE_MODULE ? "BLE" : currentMode == Bluetooth_MODULE ? "Bluetooth" : "Deactive");
+  oled.print("]");
+
+  oled.setCursor(0, 35);
+  oled.print("Radio 1: ");
+  oled.setCursor(70, 35);
+  oled.print(radio1.isChipConnected() ? "Active" : "Inactive");
+
+  oled.setCursor(0, 50);
+  oled.print("Radio 2: ");
+  oled.setCursor(70, 50);
+  oled.print(radio2.isChipConnected() ? "Active" : "Inactive");
+
+  oled.sendBuffer();
+}
+
+void checkModeChange() {
+  if (modeChangeRequested) {
+    modeChangeRequested = false;
+    currentMode = static_cast<OperationMode>((currentMode + 1) % 3);
+    initializeRadios();
+    updateOLED();
+  }
+}
+
 void bleJammerSetup() {
   header("BLE Jammer");
   oled.drawStr(8, 28, "Inicializando antenas...");
   oled.sendBuffer();
 
-  SPI.begin(SPI_SCK_PIN, SPI_MISO_PIN, SPI_MOSI_PIN);
+  SPI.begin(40, 42, 41); // SCK, MISO, MOSI
   delay(10);
 
-  bool okA = radioA.begin();
-  bool okB = radioB.begin();
+  pinMode(MODE_BUTTON, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(MODE_BUTTON), handleButtonPress, FALLING);
 
-  if (okA) configureRadio(radioA);
-  if (okB) configureRadio(radioB);
-
-  oled.clearBuffer();
-  oled.setFont(u8g2_font_5x8_tr);
-  oled.drawStr(6, 16, "Estado de antenas:");
-  oled.drawStr(6, 30, okA ? "Radio A: OK" : "Radio A: FAIL");
-  oled.drawStr(6, 42, okB ? "Radio B: OK" : "Radio B: FAIL");
-  oled.sendBuffer();
-
-  pixels.setBrightness(40);
-  pixels.setPixelColor(0, okA ? pixels.Color(0, 0, 60) : pixels.Color(80, 0, 0));
-  pixels.show();
-
-  jamMode = JAM_OFF;
-  lastJammed = millis();
-  jamPacketsSent = 0;
-  jamChannel = -1;
-  delay(800);
+  Serial.begin(115200); // Inicializar el monitor serie
+  initializeRadios();
+  updateOLED();
 }
 
-// =========================================================
-//                         LOOP
-// =========================================================
 void bleJammerLoop() {
-  // salir con LEFT
-  if (digitalRead(BTN_LEFT_PIN) == LOW) {
-    jamMode = JAM_OFF;
-    pixels.clear();
-    pixels.show();
-    oled.clearBuffer();
-    oled.sendBuffer();
-    delay(200);
-    return;
-  }
+  checkModeChange();
 
-  // cambiar modo con SELECT
-  if (digitalRead(BTN_SELECT_PIN) == LOW) {
-    jamMode = static_cast<JamMode>((jamMode + 1) % 3);
-    oled.clearBuffer();
-    oled.setFont(u8g2_font_6x10_tr);
-    oled.drawStr(10, 18, "BLE Jammer");
-    oled.setFont(u8g2_font_5x8_tr);
-    oled.drawStr(10, 38, jamMode == JAM_OFF ? "Modo: OFF" :
-                       jamMode == JAM_BLE ? "Modo: BLE" : "Modo: BT");
-    oled.drawStr(10, 54, "LEFT = salir");
-    oled.sendBuffer();
-
-    if (jamMode == JAM_OFF) pixels.setPixelColor(0, pixels.Color(20, 20, 20));
-    else if (jamMode == JAM_BLE) pixels.setPixelColor(0, pixels.Color(0, 80, 0));
-    else pixels.setPixelColor(0, pixels.Color(80, 80, 0));
-    pixels.show();
-
-    delay(250);
-  }
-
-  // operación periódica (envío)
-  if (jamMode != JAM_OFF && millis() - lastJammed > 200) {
-    int bleChs[] = {2, 26, 80};
-    int btChs[]  = {32, 34, 46, 48, 50, 52};
-    int ch = (jamMode == JAM_BLE)
-      ? bleChs[random(0, 3)]
-      : btChs[random(0, 6)];
-
-    jamChannel = ch;
-    const char payload[] = "xxxxxxxxxxxxx";
-
-    // Transmitir con ambas si están conectadas
-    if (radioA.isChipConnected()) {
-      radioA.setChannel(ch);
-      radioA.write(&payload, sizeof(payload));
-    }
-    if (radioB.isChipConnected()) {
-      radioB.setChannel(ch);
-      radioB.write(&payload, sizeof(payload));
-    }
-
-    jamPacketsSent++;
-    lastJammed = millis();
-  }
-
-  // mostrar info cada 500 ms
-  static unsigned long lastDisplay = 0;
-  if (millis() - lastDisplay > 500) {
-    oled.clearBuffer();
-    oled.setFont(u8g2_font_6x10_tr);
-    oled.drawStr(10, 10, "BLE Jammer");
-    oled.setFont(u8g2_font_5x8_tr);
-    oled.drawStr(10, 24, jamMode == JAM_OFF ? "Modo: OFF" :
-                       jamMode == JAM_BLE ? "Modo: BLE" : "Modo: BT");
-
-    char buf[32];
-    snprintf(buf, sizeof(buf), "Canal: %d", jamChannel);
-    oled.drawStr(10, 38, buf);
-
-    snprintf(buf, sizeof(buf), "Paquetes: %lu", (unsigned long)jamPacketsSent);
-    oled.drawStr(10, 52, buf);
-    oled.sendBuffer();
-    lastDisplay = millis();
+  if (currentMode == BLE_MODULE) {
+    int randomIndex = random(0, sizeof(ble_channels) / sizeof(ble_channels[0]));
+    byte channel = ble_channels[randomIndex];
+    radio1.setChannel(channel);
+    radio2.setChannel(channel);
+    jammer(radio1, &channel, 1);
+    jammer(radio2, &channel, 1);
+  } else if (currentMode == Bluetooth_MODULE) {
+    int randomIndex = random(0, sizeof(bluetooth_channels) / sizeof(bluetooth_channels[0]));
+    byte channel = bluetooth_channels[randomIndex];
+    radio1.setChannel(channel);
+    radio2.setChannel(channel);
+    jammer(radio1, &channel, 1);
+    jammer(radio2, &channel, 1);
   }
 }
 
 } // namespace BleJammer
-
-
-

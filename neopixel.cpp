@@ -5,7 +5,7 @@
 #include <Adafruit_NeoPixel.h>
 #include <EEPROM.h>
 
-extern Adafruit_NeoPixel pixels;  // ✅ Solo referencia, no redefinir
+extern Adafruit_NeoPixel pixels;  // Solo referencia, no redefinir
 
 void neopixelSetup()
 {

@@ -28,6 +28,11 @@
 #include "ble_jammer_module.h"
 #include "setting.h"
 #include "nrf_module.h"  // ✅ Nuevo módulo nRF24 (antenas A y B)
+#include "captive_portal_module.h"
+#include "esp_wifi.h"
+#include "esp_event.h"
+#include "esp_netif.h"
+
 
 // === OLED (para el menú principal con U8G2) ===
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE);
@@ -45,6 +50,35 @@ Adafruit_NeoPixel pixels(1, 48, NEO_GRB + NEO_KHZ800);
 #define BTN_LEFT    11
 #define BTN_RIGHT   10
 #define BTN_SELECT  9
+
+// ===========================================================
+// 🧾 Registro de logs para Captive Portal (y otros módulos)
+// ===========================================================
+void appendLog(const String &line) {
+  // Si tienes SD o SPIFFS puedes reemplazar esto por guardado en archivo.
+  // Por ahora lo dejamos simple para depuración:
+  Serial.println("[LOG] " + line);
+}
+
+void resetWifiStack() {
+  Serial.println("🧹 Reiniciando stack WiFi...");
+  WiFi.disconnect(true, true);
+  delay(100);
+
+  // Detener completamente la interfaz WiFi
+  esp_wifi_stop();
+  delay(100);
+
+  // Reiniciar el driver WiFi
+  esp_wifi_start();
+  delay(150);
+
+  // Volver a modo estación
+  WiFi.mode(WIFI_STA);
+  delay(150);
+}
+
+
 
 // === VARIABLES GLOBALES ===
 String activeModule = "";
@@ -64,7 +98,7 @@ const unsigned char* mainIcons[] = {
   bitmap_icon_wifi, bitmap_icon_ble, bitmap_icon_sword,
   bitmap_icon_setting, bitmap_icon_about
 };
-const char* wifiMenuText[] = {"WiFi Scan","Analyzer","Deauther","Back"};
+const char* wifiMenuText[] = {"WiFi Scan","Analyzer","Captive Portal","Back"};
 const char* bleMenuText[]  = {"BLE Scan","BLE Analyzer","Beacon Detector","BLE Jammer","Back"};
 
 // === FUNCIONES UTILITARIAS ===
@@ -233,9 +267,22 @@ void loop() {
       if (btnPressed(BTN_SELECT)) {
         if (listIndex == 0) { inModule = true; activeModule = "wifiscan"; WifiScan::wifiscanSetup(); return; }
         if (listIndex == 1) { inModule = true; activeModule = "analyzer"; Analyzer::analyzerSetup(); return; }
-        if (listIndex == 2) { header("Deauther"); oled.drawStr(2,22,"(demo)"); oled.sendBuffer(); delay(1000); drawWifiMenu(); return; }
+
+        // --- Captive Portal ---
+        if (listIndex == 2) {
+          inModule = true;
+          activeModule = "captiveportal";
+
+          // 🔧 Reinicio forzado del stack Wi-Fi (previene “Iniciando...” colgado)
+          resetWifiStack();   // 🧩 reinicia completamente el módulo WiFi
+
+          CaptivePortal::setup();
+          return;
+        }
+
         if (listIndex == 3) { currentMenu = MAIN_MENU; drawMainMenu(); return; }
       }
+
       if (btnPressed(BTN_LEFT)) { currentMenu = MAIN_MENU; drawMainMenu(); }
     }
 
@@ -251,21 +298,37 @@ void loop() {
         if (listIndex == 3) { inModule = true; activeModule = "blejammer"; BleJammer::bleJammerSetup(); return; }
         if (listIndex == 4) { currentMenu = MAIN_MENU; drawMainMenu(); return; }
       }
+
       if (btnPressed(BTN_LEFT)) { currentMenu = MAIN_MENU; drawMainMenu(); }
     }
   } 
   else {
     // --- MÓDULOS ACTIVOS ---
-    if (btnPressed(BTN_LEFT)) { 
-      inModule = false; activeModule = ""; pixels.clear(); pixels.show(); drawMainMenu(); 
-    } else {
+    if (btnPressed(BTN_LEFT)) {
+      // 🧩 Si estás dentro de Captive Portal, apágalo completamente
+      if (activeModule == "captiveportal") {
+        CaptivePortal::stop();         // Cierra servidor, DNS y AP
+        delay(200);                    // Espera a liberar Wi-Fi
+      }
+
+      // 🔙 Regresa al menú principal
+      inModule = false;
+      activeModule = "";
+      pixels.clear();
+      pixels.show();
+      drawMainMenu();
+    } 
+    else {
+      // 🔁 Ejecuta el bucle correspondiente al módulo activo
       if (activeModule == "wifiscan")        WifiScan::wifiscanLoop();
       else if (activeModule == "analyzer")   Analyzer::analyzerLoop();
+      else if (activeModule == "captiveportal") CaptivePortal::loop();
       else if (activeModule == "blescan")    BluetoothModule::bleScanLoop();
       else if (activeModule == "bleanalyzer")BluetoothModule::bleAnalyzerLoop();
       else if (activeModule == "beacon")     BluetoothModule::beaconLoop();
       else if (activeModule == "blejammer")  BleJammer::bleJammerLoop();
       else if (activeModule == "nrf")        nrfLoop();
+
       delay(120);
     }
   }
